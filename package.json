@@ -16,7 +16,7 @@
     "@ionic/core": "^7.0.0"
   },
   "peerDependencies": {
-    "svelte": "^5.0.0"
+    "svelte": "^4.0.0"
   },
   "devDependencies": {
     "typescript": "^5.0.0",
