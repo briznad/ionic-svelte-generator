@@ -13,10 +13,11 @@
     "web-components"
   ],
   "dependencies": {
-    "@ionic/core": "^7.0.0"
+    "@ionic/core": "^8.5.1"
   },
   "peerDependencies": {
-    "svelte": "^4.0.0"
+    "svelte": "^4.0.0",
+    "@ionic/core": "^8.5.1"
   },
   "devDependencies": {
     "typescript": "^5.0.0",

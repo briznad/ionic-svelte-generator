@@ -1,16 +1,17 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { fetch } from 'undici'; // Modern fetch implementation
+import { fetch } from 'undici';
+import { createRequire } from 'module';
 
 // Get current directory (ESM equivalent of __dirname)
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Try alternative URLs if the primary one fails
+// Configuration
 const IONIC_CORE_JSON = 'https://unpkg.com/@ionic/docs/core.json';
-
-const OUTPUT_DIR = path.join(__dirname, './ionic-svelte');
+const OUTPUT_DIR = path.join(__dirname, './dist');
+const PACKAGE_JSON_PATH = path.join(__dirname, 'package.json');
 
 /**
  * Ensures output directory exists
@@ -26,13 +27,12 @@ async function ensureOutputDir() {
 
 /**
  * Downloads the Ionic components definition JSON using fetch API
- * @returns {Promise<Object>} The parsed JSON data
+ * @returns {Promise<{data: Object, version: string}>} The parsed JSON data and extracted version
  */
 async function downloadIonicDefinition() {
   try {
     console.log(`Fetching from: ${IONIC_CORE_JSON}`);
 
-    // Fetch will automatically follow redirects
     const response = await fetch(IONIC_CORE_JSON, {
       redirect: 'follow',
     });
@@ -41,16 +41,27 @@ async function downloadIonicDefinition() {
       throw new Error(`Failed to download: Status code ${response.status}`);
     }
 
-    // Log the actual URL after redirects
-    console.log(`Successfully downloaded from: ${response.url}`);
+    // Extract version from the redirected URL
+    // The URL pattern is typically: https://unpkg.com/@ionic/docs@8.5.1/core.json
+    const finalUrl = response.url;
+    console.log(`Successfully downloaded from: ${finalUrl}`);
 
-    // Parse the JSON response
-    const jsonData = await response.json();
+    // Extract version using regex
+    const versionMatch = finalUrl.match(/@ionic\/docs@([^/]+)/);
+    const version = versionMatch ? versionMatch[1] : null;
 
-    return jsonData;
+    if (version) {
+      console.log(`Detected Ionic Docs version: ${version}`);
+    } else {
+      console.warn('Could not determine Ionic version from URL. Using latest.');
+    }
+
+    return {
+      data: await response.json(),
+      version
+    };
   } catch (error) {
     console.error(`Error downloading from ${IONIC_CORE_JSON}: ${error.message}`);
-
     process.exit(1);
   }
 }
@@ -67,189 +78,331 @@ function toPascalCase(tag) {
 }
 
 /**
- * Gets TypeScript type annotation for a prop
- * @param {Object} prop - The property definition
- * @returns {string} TypeScript type annotation
+ * Generate TypeScript type for a property
+ * @param {Object} prop - The property definition from Ionic
+ * @returns {string} TypeScript type definition
  */
-function getTypeAnnotation(prop) {
-  if (!prop.type) return 'any';
+function generatePropType(prop) {
+  if (!prop) return 'any';
 
-  let type = prop.type;
+  // Handle complex types with references
+  if (prop.complexType) {
+    if (prop.complexType.original === 'boolean') return 'boolean';
+    if (prop.complexType.original === 'string') return 'string';
+    if (prop.complexType.original === 'number') return 'number';
 
-  // Handle special cases
-  if (type.includes('|')) {
-    if (type.includes('string') && type.includes('undefined')) {
-      return 'string | undefined';
-    } else if (type.includes('boolean') && type.includes('undefined')) {
-      return 'boolean | undefined';
-    } else if (type.includes('number') && type.includes('undefined')) {
-      return 'number | undefined';
-    } else {
-      return 'any';
+    if (prop.complexType.resolved) {
+      return prop.complexType.resolved;
     }
   }
 
-  // Simple types
-  if (type === 'string' || type === 'boolean' || type === 'number') {
-    return type;
+  // Handle simple types
+  if (prop.type) {
+    // Handle union types
+    if (typeof prop.type === 'string' && prop.type.includes('|')) {
+      return prop.type;
+    }
+
+    return prop.type;
   }
 
   return 'any';
 }
 
 /**
- * Gets the default value for a prop as a string representation
+ * Extract possible values from a property
  * @param {Object} prop - The property definition
- * @returns {string} The default value as a string
+ * @returns {Array<string>} List of allowed values if available
  */
-function getDefaultValue(prop) {
-  if (prop.default === undefined || prop.default === null) {
-    return 'undefined';
+function extractPropValues(prop) {
+  if (prop.values && Array.isArray(prop.values)) {
+    const literalValues = prop.values
+      .filter(v => v.value !== undefined)
+      .map(v => v.value);
+
+    if (literalValues.length > 0) {
+      return literalValues;
+    }
   }
 
-  if (typeof prop.default === 'string') {
-    return JSON.stringify(prop.default);
-  }
-
-  if (typeof prop.default === 'boolean' || typeof prop.default === 'number') {
-    return String(prop.default);
-  }
-
-  return 'undefined';
+  return null;
 }
 
 /**
- * Generates the Svelte component wrapper for an Ionic component
+ * Generates TypeScript interface for a component
  * @param {Object} component - The component definition
- * @returns {string} The Svelte component code
+ * @returns {string} TypeScript interface
  */
-function generateSvelteComponent(component) {
-  const { tag, props = [], events = [], slots = [] } = component;
-  const componentName = toPascalCase(tag);
+function generateComponentInterface(component) {
+  const componentName = toPascalCase(component.tag);
+  const props = component.props || [];
 
-  // Generate props
-  const propsDefinition = props.map(prop => {
-    const typeAnnotation = getTypeAnnotation(prop);
-    const defaultValue = getDefaultValue(prop);
+  if (props.length === 0) {
+    return `export interface ${componentName}Props {}\n`;
+  }
 
-    return `export let ${prop.name}: ${typeAnnotation} = ${defaultValue};`;
-  }).join('\n  ');
+  let interfaceContent = `export interface ${componentName}Props {\n`;
 
-  // Generate event types
-  const eventTypes = events.map(event => {
-    const eventName = event.event;
-    const detailType = event.detail || 'any';
+  for (const prop of props) {
+    // Add JSDoc comment if there's documentation
+    if (prop.docs) {
+      interfaceContent += `  /**\n`;
+      interfaceContent += `   * ${prop.docs}\n`;
 
-    return `  ${eventName}: CustomEvent<${detailType}>;`;
-  }).join('\n');
+      // Add default value if available
+      if (prop.default !== undefined) {
+        interfaceContent += `   * @default ${prop.default}\n`;
+      }
 
-  // Generate the Svelte component
-  return `<script lang="ts">
-  import { onMount, createEventDispatcher } from 'svelte';
-  import '@ionic/core/dist/ionic/ionic.js';
-
-  // Props
-  ${propsDefinition || '// No props defined for this component'}
-
-  // Event dispatcher
-  const dispatch = createEventDispatcher<{
-${eventTypes || '  // No events defined for this component'}
-  }>();
-
-  let element: HTMLElement;
-
-  onMount(() => {
-    // Set up event forwarding
-    if (element) {
-      const events = [${events.map(e => `'${e.event}'`).join(', ')}];
-
-      events.forEach(eventName => {
-        element.addEventListener(eventName, (event: CustomEvent) => {
-          dispatch(eventName, event.detail);
-        });
-      });
+      interfaceContent += `   */\n`;
     }
 
-    return () => {
-      // Clean up event listeners
-      if (element) {
-        const events = [${events.map(e => `'${e.event}'`).join(', ')}];
+    const propName = prop.name;
+    let propType = generatePropType(prop);
+    const isOptional = propType.includes('|') && propType.includes('undefined');
 
-        events.forEach(eventName => {
-          element.removeEventListener(eventName, (event: CustomEvent) => {
-            dispatch(eventName, event.detail);
-          });
+    // Create literal union types for enum-like props
+    const values = extractPropValues(prop);
+    if (values && values.length > 0) {
+      propType = values.map(v => `'${v}'`).join(' | ');
+
+      // Add undefined if optional
+      if (isOptional) {
+        propType += ' | undefined';
+      }
+    }
+
+    // Add the property
+    interfaceContent += `  ${propName}${isOptional ? '?' : ''}: ${propType};\n`;
+  }
+
+  interfaceContent += `}\n`;
+  return interfaceContent;
+}
+
+/**
+ * Generates runtime Svelte components using the factory pattern
+ * @param {Array} components - The component definitions
+ * @returns {string} The component factory code
+ */
+function generateRuntimeComponents(components) {
+  let imports = `import '@ionic/core/dist/ionic/ionic.js';\n`;
+
+  // Add imports for each component's defineCustomElement
+  components.forEach(component => {
+    const tag = component.tag;
+    imports += `import { defineCustomElement as define${toPascalCase(tag)} } from '@ionic/core/components/${tag}.js';\n`;
+  });
+
+  imports += '\n// Define custom elements\n';
+  components.forEach(component => {
+    imports += `define${toPascalCase(component.tag)}();\n`;
+  });
+
+  const factoryFunction = `
+/**
+ * Creates a Svelte component for an Ionic web component
+ * @param {string} tagName - The tag name of the Ionic component
+ * @returns {Function} - A Svelte component constructor
+ */
+function createSvelteComponent(tagName) {
+  return function(options) {
+    const { target, props = {}, events = {} } = options;
+
+    // Create element
+    const element = document.createElement(tagName);
+
+    // Attach to DOM
+    target.appendChild(element);
+
+    // Set initial props
+    Object.entries(props).forEach(([key, value]) => {
+      if (value !== undefined) {
+        if (key === 'class') {
+          element.className = value;
+        } else if (key === 'style') {
+          Object.assign(element.style, value);
+        } else if (key.startsWith('on') && typeof value === 'function') {
+          const eventName = key.slice(2).toLowerCase();
+          element.addEventListener(eventName, value);
+        } else {
+          element[key] = value;
+        }
+      }
+    });
+
+    // Set up event listeners
+    Object.entries(events).forEach(([eventName, handler]) => {
+      element.addEventListener(eventName, handler);
+    });
+
+    return {
+      update(newProps) {
+        // Update properties when component updates
+        Object.entries(newProps).forEach(([key, value]) => {
+          if (value !== undefined) {
+            if (key === 'class') {
+              element.className = value;
+            } else if (key === 'style') {
+              Object.assign(element.style, value);
+            } else if (!key.startsWith('on')) {
+              element[key] = value;
+            }
+          }
         });
+      },
+      destroy() {
+        // Remove event listeners
+        Object.keys(events).forEach(eventName => {
+          element.removeEventListener(eventName, events[eventName]);
+        });
+
+        // Remove prop event listeners
+        Object.entries(props).forEach(([key, value]) => {
+          if (key.startsWith('on') && typeof value === 'function') {
+            const eventName = key.slice(2).toLowerCase();
+            element.removeEventListener(eventName, value);
+          }
+        });
+
+        // Remove from DOM
+        if (element.parentNode) {
+          element.parentNode.removeChild(element);
+        }
       }
     };
-  });
-</script>
-
-<${tag}
-  bind:this={element}
-  ${props.map(prop => `${prop.name}={${prop.name}}`).join('\n  ')}
-  {...$$restProps}
->
-  <slot />
-  ${slots.map(slot => `<slot name="${slot.name}" slot="${slot.name}" />`).join('\n  ')}
-</${tag}>
+  };
+}
 `;
-}
 
-/**
- * Generates the TypeScript definition file for the index
- * @param {Array} components - List of component definitions
- */
-async function generateTypeDefinition(components) {
-  const imports = components.map(component => {
+  // Export components
+  let exports = '\n// Create and export Ionic Svelte components\n';
+  components.forEach(component => {
     const componentName = toPascalCase(component.tag);
-    return `export { default as ${componentName} } from './${componentName}.svelte';`;
-  }).join('\n');
+    // Add JSDoc comment with component description
+    if (component.docs) {
+      exports += `/**\n * ${component.docs}\n */\n`;
+    }
+    exports += `export const ${componentName} = createSvelteComponent('${component.tag}');\n`;
+  });
 
-  await fs.writeFile(path.join(OUTPUT_DIR, 'index.d.ts'), imports);
-  console.log('Generated index.d.ts');
+  return imports + factoryFunction + exports;
 }
 
 /**
- * Generates the index.js file that exports all components
+ * Generates TypeScript definition file for all components
  * @param {Array} components - List of component definitions
+ * @returns {string} TypeScript definition content
  */
-async function generateIndexFile(components) {
-  const imports = components.map(component => {
-    const componentName = toPascalCase(component.tag);
-    return `export { default as ${componentName} } from './${componentName}.svelte';`;
-  }).join('\n');
+function generateTypeDefinitions(components) {
+  let typeDefsHeader = `// Type definitions for Ionic-Svelte components\n\n`;
 
-  await fs.writeFile(path.join(OUTPUT_DIR, 'index.js'), imports);
-  console.log('Generated index.js');
+  // Define the base component interfaces
+  typeDefsHeader += `interface ComponentOptions<Props = {}> {\n`;
+  typeDefsHeader += `  target: HTMLElement;\n`;
+  typeDefsHeader += `  props?: Props;\n`;
+  typeDefsHeader += `  events?: Record<string, (event: CustomEvent) => void>;\n`;
+  typeDefsHeader += `}\n\n`;
+
+  typeDefsHeader += `interface SvelteComponent {\n`;
+  typeDefsHeader += `  update(props: Record<string, any>): void;\n`;
+  typeDefsHeader += `  destroy(): void;\n`;
+  typeDefsHeader += `}\n\n`;
+
+  // Generate component-specific interfaces
+  let componentInterfaces = '';
+  let componentExports = '';
+
+  for (const component of components) {
+    const componentName = toPascalCase(component.tag);
+
+    // Generate the props interface
+    componentInterfaces += generateComponentInterface(component);
+
+    // Generate the component export
+    componentExports += `export declare const ${componentName}: (options: ComponentOptions<${componentName}Props>) => SvelteComponent;\n`;
+  }
+
+  return typeDefsHeader + componentInterfaces + '\n' + componentExports;
 }
 
 /**
- * Main function to process the Ionic components and generate Svelte wrappers
+ * Updates package.json to set the correct Ionic version
+ * @param {string} version - The version to set
+ */
+async function updatePackageJson(version) {
+  if (!version) {
+    console.log('No version provided, skipping package.json update.');
+    return;
+  }
+
+  try {
+    console.log(`Updating package.json with Ionic version ${version}...`);
+
+    // Check if package.json exists
+    let packageJson;
+    try {
+      const packageJsonContent = await fs.readFile(PACKAGE_JSON_PATH, 'utf8');
+      packageJson = JSON.parse(packageJsonContent);
+    } catch (err) {
+      // If package.json doesn't exist or can't be parsed, create a new one
+      console.log('Creating new package.json file...');
+      packageJson = {
+        name: "ionic-svelte",
+        version: "1.0.0",
+        description: "Svelte wrappers for Ionic Web Components",
+        type: "module",
+        dependencies: {},
+        peerDependencies: {}
+      };
+    }
+
+    // Update dependencies and peerDependencies
+    packageJson.dependencies = packageJson.dependencies || {};
+    packageJson.peerDependencies = packageJson.peerDependencies || {};
+
+    packageJson.dependencies['@ionic/core'] = `^${version}`;
+    packageJson.peerDependencies['@ionic/core'] = `^${version}`;
+
+    // Write updated package.json
+    await fs.writeFile(
+      PACKAGE_JSON_PATH,
+      JSON.stringify(packageJson, null, 2),
+      'utf8'
+    );
+    console.log('package.json updated successfully.');
+
+  } catch (err) {
+    console.error('Error updating package.json:', err.message);
+  }
+}
+
+/**
+ * Main function to process the Ionic components and generate index.js
  */
 async function main() {
   try {
     await ensureOutputDir();
 
     console.log('Downloading Ionic components definition...');
-    const ionicDef = await downloadIonicDefinition();
+    const { data: ionicDef, version } = await downloadIonicDefinition();
 
     console.log(`Found ${ionicDef.components.length} components to process`);
 
-    // Generate individual component files
-    for (const component of ionicDef.components) {
-      const componentName = toPascalCase(component.tag);
-      const componentCode = generateSvelteComponent(component);
+    // Generate the runtime index.js file
+    const runtimeCode = generateRuntimeComponents(ionicDef.components);
+    await fs.writeFile(path.join(OUTPUT_DIR, 'index.js'), runtimeCode);
+    console.log('Generated index.js');
 
-      await fs.writeFile(path.join(OUTPUT_DIR, `${componentName}.svelte`), componentCode);
-      console.log(`Generated ${componentName}.svelte`);
-    }
+    // Generate the TypeScript definition file
+    const typeDefinitions = generateTypeDefinitions(ionicDef.components);
+    await fs.writeFile(path.join(OUTPUT_DIR, 'index.d.ts'), typeDefinitions);
+    console.log('Generated index.d.ts with rich type definitions');
 
-    // Generate index file and TypeScript definitions
-    await generateIndexFile(ionicDef.components);
-    await generateTypeDefinition(ionicDef.components);
+    // Update package.json with the detected version
+    await updatePackageJson(version);
 
-    console.log('\nSuccessfully generated all Svelte components for Ionic web components!');
+    console.log('\nSuccessfully generated index.js and index.d.ts with all Ionic web components as Svelte components!');
     console.log(`Output directory: ${path.resolve(OUTPUT_DIR)}`);
 
   } catch (error) {
