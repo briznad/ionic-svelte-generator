@@ -1,0 +1,25 @@
+{
+  "name": "ionic-svelte-wrappers",
+  "version": "1.0.0",
+  "description": "Svelte component wrappers for Ionic Web Components",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "generate": "node generator.js"
+  },
+  "keywords": [
+    "ionic",
+    "svelte",
+    "web-components"
+  ],
+  "dependencies": {
+    "@ionic/core": "^7.0.0"
+  },
+  "peerDependencies": {
+    "svelte": "^5.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "undici": "^5.0.0"
+  }
+}
