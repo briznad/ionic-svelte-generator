@@ -78,54 +78,108 @@ function toPascalCase(tag) {
 }
 
 /**
- * Generate TypeScript type for a property
- * @param {Object} prop - The property definition from Ionic
- * @returns {string} TypeScript type definition
+ * Get the best type representation for a property, preferring interface references
+ * @param {Object} prop - Property definition from Ionic
+ * @returns {string} TypeScript type representation
  */
-function generatePropType(prop) {
-  if (!prop) return 'any';
+function getPropertyType(prop) {
+  // If there are no complex types, use the simple type
+  if (!prop.complexType) {
+    return prop.type || 'any';
+  }
 
-  // Handle complex types with references
-  if (prop.complexType) {
-    if (prop.complexType.original === 'boolean') return 'boolean';
-    if (prop.complexType.original === 'string') return 'string';
-    if (prop.complexType.original === 'number') return 'number';
+  // Look for references to use directly
+  if (prop.complexType.references) {
+    const references = Object.entries(prop.complexType.references);
 
-    if (prop.complexType.resolved) {
-      return prop.complexType.resolved;
+    // Special case for common types
+    if (prop.name === 'color' && references.some(([name]) => name === 'Color')) {
+      return 'Color';
+    }
+
+    // Find the first importable interface
+    for (const [name, ref] of references) {
+      if (ref.location === 'import' && !['Promise', 'Event'].includes(name) && !name.startsWith('HTML')) {
+        // If it's an interface type, use it directly
+        return name;
+      }
     }
   }
 
-  // Handle simple types
-  if (prop.type) {
-    // Handle union types
-    if (typeof prop.type === 'string' && prop.type.includes('|')) {
-      return prop.type;
+  // If it's a specific interface type like AnimationBuilder
+  if (prop.complexType.original && typeof prop.complexType.original === 'string') {
+    if (prop.complexType.original.includes('AnimationBuilder')) {
+      return 'AnimationBuilder';
     }
-
-    return prop.type;
   }
 
-  return 'any';
+  // Fall back to the resolved type
+  return prop.complexType.resolved || prop.type || 'any';
 }
 
 /**
- * Extract possible values from a property
- * @param {Object} prop - The property definition
- * @returns {Array<string>} List of allowed values if available
+ * Explores a component definition to find all interfaces that should be imported
+ * @param {Object} component - The component definition
+ * @returns {Map<string, string>} Map of interface name to import path
  */
-function extractPropValues(prop) {
-  if (prop.values && Array.isArray(prop.values)) {
-    const literalValues = prop.values
-      .filter(v => v.value !== undefined)
-      .map(v => v.value);
+function findInterfacesInComponent(component) {
+  const interfaces = new Map();
 
-    if (literalValues.length > 0) {
-      return literalValues;
+  // Process properties
+  if (component.props) {
+    for (const prop of component.props) {
+      if (prop.complexType && prop.complexType.references) {
+        Object.entries(prop.complexType.references).forEach(([refName, ref]) => {
+          // Skip DOM types and primitive types
+          if (ref.location === 'global' || ['Event', 'HTMLElement'].includes(refName)) {
+            return;
+          }
+
+          // Convert the relative path to the package path
+          const importPath = ref.path.replace(/^\.\.\/\.\.\//, '');
+          interfaces.set(refName, `@ionic/core/dist/types/${importPath}`);
+        });
+      }
     }
   }
 
-  return null;
+  // Process events
+  if (component.events) {
+    for (const event of component.events) {
+      if (event.complexType && event.complexType.references) {
+        Object.entries(event.complexType.references).forEach(([refName, ref]) => {
+          // Skip DOM types and primitive types
+          if (ref.location === 'global' || ['Event', 'HTMLElement'].includes(refName)) {
+            return;
+          }
+
+          // Convert the relative path to the package path
+          const importPath = ref.path.replace(/^\.\.\/\.\.\//, '');
+          interfaces.set(refName, `@ionic/core/dist/types/${importPath}`);
+        });
+      }
+    }
+  }
+
+  // Process methods
+  if (component.methods) {
+    for (const method of component.methods) {
+      if (method.complexType && method.complexType.references) {
+        Object.entries(method.complexType.references).forEach(([refName, ref]) => {
+          // Skip DOM types and primitive types
+          if (ref.location === 'global' || ['Event', 'HTMLElement', 'Promise'].includes(refName)) {
+            return;
+          }
+
+          // Convert the relative path to the package path
+          const importPath = ref.path.replace(/^\.\.\/\.\.\//, '');
+          interfaces.set(refName, `@ionic/core/dist/types/${importPath}`);
+        });
+      }
+    }
+  }
+
+  return interfaces;
 }
 
 /**
@@ -295,35 +349,94 @@ function createSvelteComponent(tagName) {
  * @returns {string} TypeScript definition content
  */
 function generateTypeDefinitions(components) {
-  let typeDefsHeader = `// Type definitions for Ionic-Svelte components\n\n`;
-
-  // Define the base component interfaces
-  typeDefsHeader += `interface ComponentOptions<Props = {}> {\n`;
-  typeDefsHeader += `  target: HTMLElement;\n`;
-  typeDefsHeader += `  props?: Props;\n`;
-  typeDefsHeader += `  events?: Record<string, (event: CustomEvent) => void>;\n`;
-  typeDefsHeader += `}\n\n`;
-
-  typeDefsHeader += `interface SvelteComponent {\n`;
-  typeDefsHeader += `  update(props: Record<string, any>): void;\n`;
-  typeDefsHeader += `  destroy(): void;\n`;
-  typeDefsHeader += `}\n\n`;
-
-  // Generate component-specific interfaces
-  let componentInterfaces = '';
-  let componentExports = '';
+  // Collect all required interfaces from all components
+  const allInterfaces = new Map();
 
   for (const component of components) {
-    const componentName = toPascalCase(component.tag);
-
-    // Generate the props interface
-    componentInterfaces += generateComponentInterface(component);
-
-    // Generate the component export
-    componentExports += `export declare const ${componentName}: (options: ComponentOptions<${componentName}Props>) => SvelteComponent;\n`;
+    const componentInterfaces = findInterfacesInComponent(component);
+    componentInterfaces.forEach((path, name) => {
+      allInterfaces.set(name, path);
+    });
   }
 
-  return typeDefsHeader + componentInterfaces + '\n' + componentExports;
+  // Ensure we always have these core interfaces
+  allInterfaces.set('Color', '@ionic/core/dist/types/interface');
+  allInterfaces.set('AnimationBuilder', '@ionic/core/dist/types/interface');
+
+  // Generate the TypeScript definition file
+  let typeDefsContent = `// Type definitions for Ionic-Svelte components\n\n`;
+
+  // Group imports by path
+  const importGroups = new Map();
+  allInterfaces.forEach((path, name) => {
+    if (!importGroups.has(path)) {
+      importGroups.set(path, []);
+    }
+    importGroups.get(path).push(name);
+  });
+
+  // Generate import statements
+  importGroups.forEach((names, path) => {
+    typeDefsContent += `import { ${names.sort().join(', ')} } from '${path}';\n`;
+  });
+
+  typeDefsContent += '\n';
+
+  // Define the base component interfaces
+  typeDefsContent += `interface ComponentOptions<Props = {}> {\n`;
+  typeDefsContent += `  target: HTMLElement;\n`;
+  typeDefsContent += `  props?: Props;\n`;
+  typeDefsContent += `  events?: Record<string, (event: CustomEvent) => void>;\n`;
+  typeDefsContent += `}\n\n`;
+
+  typeDefsContent += `interface SvelteComponent {\n`;
+  typeDefsContent += `  update(props: Record<string, any>): void;\n`;
+  typeDefsContent += `  destroy(): void;\n`;
+  typeDefsContent += `}\n\n`;
+
+  // Generate component interfaces that use the imported types
+  for (const component of components) {
+    const componentName = toPascalCase(component.tag);
+    typeDefsContent += `export interface ${componentName}Props {\n`;
+
+    if (component.props && component.props.length > 0) {
+      for (const prop of component.props) {
+        // Add JSDoc comment
+        if (prop.docs) {
+          typeDefsContent += `  /**\n`;
+          typeDefsContent += `   * ${prop.docs}\n`;
+
+          if (prop.default !== undefined) {
+            typeDefsContent += `   * @default ${prop.default}\n`;
+          }
+
+          typeDefsContent += `   */\n`;
+        }
+
+        // Use the original property type if possible
+        const isOptional = prop.optional ||
+                          (prop.complexType &&
+                           prop.complexType.resolved &&
+                           prop.complexType.resolved.includes('undefined'));
+
+        // Get the best type representation for this property
+        const propType = getPropertyType(prop);
+
+        typeDefsContent += `  ${prop.name}${isOptional ? '?' : ''}: ${propType};\n`;
+      }
+    }
+
+    typeDefsContent += `}\n\n`;
+
+    // Add the component declaration
+    if (component.docs) {
+      typeDefsContent += `/**\n * ${component.docs}\n */\n`;
+    }
+
+    typeDefsContent += `export declare const ${componentName}: (options: ComponentOptions<${componentName}Props>) => SvelteComponent;\n\n`;
+  }
+
+  return typeDefsContent;
 }
 
 /**
@@ -377,6 +490,34 @@ async function updatePackageJson(version) {
   }
 }
 
+// Generate the runtime package.json file for the output directory
+async function generatePackageJson(version) {
+  if (!version) {
+    console.log('No version provided, using "latest" for package.json');
+    version = 'latest';
+  }
+
+  const packageJson = {
+    "name": "ionic-svelte",
+    "version": "1.0.0",
+    "description": "Svelte wrappers for Ionic Web Components",
+    "type": "module",
+    "main": "index.js",
+    "types": "index.d.ts",
+    "peerDependencies": {
+      "@ionic/core": `^${version}`
+    }
+  };
+
+  await fs.writeFile(
+    path.join(OUTPUT_DIR, 'package.json'),
+    JSON.stringify(packageJson, null, 2),
+    'utf8'
+  );
+
+  console.log(`Generated package.json in output directory with @ionic/core version ${version}`);
+}
+
 /**
  * Main function to process the Ionic components and generate index.js
  */
@@ -397,12 +538,15 @@ async function main() {
     // Generate the TypeScript definition file
     const typeDefinitions = generateTypeDefinitions(ionicDef.components);
     await fs.writeFile(path.join(OUTPUT_DIR, 'index.d.ts'), typeDefinitions);
-    console.log('Generated index.d.ts with rich type definitions');
+    console.log('Generated index.d.ts with rich type definitions from Ionic');
 
-    // Update package.json with the detected version
+    // Generate package.json in the output directory
+    await generatePackageJson(version);
+
+    // Update root package.json with the detected version
     await updatePackageJson(version);
 
-    console.log('\nSuccessfully generated index.js and index.d.ts with all Ionic web components as Svelte components!');
+    console.log('\nSuccessfully generated files for Ionic web components as Svelte components!');
     console.log(`Output directory: ${path.resolve(OUTPUT_DIR)}`);
 
   } catch (error) {

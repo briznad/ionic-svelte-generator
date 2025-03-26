@@ -1,8 +1,8 @@
 {
-  "name": "ionic-svelte-wrappers",
+  "name": "ionic-svelte-generator",
   "version": "1.0.0",
   "description": "Svelte component wrappers for Ionic Web Components",
-  "main": "index.js",
+  "main": "./dist/index.js",
   "type": "module",
   "scripts": {
     "generate": "node generator.js"
@@ -22,5 +22,11 @@
   "devDependencies": {
     "typescript": "^5.0.0",
     "undici": "^5.0.0"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "Brad Mallow",
+    "email": "brad.mallow@gmail.com",
+    "url": "https://bradmallow.com"
   }
 }
