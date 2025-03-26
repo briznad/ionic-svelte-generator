@@ -1,5 +1,5 @@
 {
-  "name": "ionic-svelte-generator",
+  "name": "ionic-svelte-wrappers",
   "version": "1.0.0",
   "description": "Svelte component wrappers for Ionic Web Components",
   "main": "./dist/index.js",
